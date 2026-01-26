@@ -1,0 +1,138 @@
+# AI4DSNI Configuration
+# Unified config with Hydra interpolation
+
+defaults:
+  - _self_
+
+# Paths
+paths:
+  root: ${hydra:runtime.cwd}
+  data: ${paths.root}/data
+  output: ${paths.root}/outputs
+  checkpoints: ${paths.output}/checkpoints
+  logs: ${paths.output}/logs
+
+# Data configuration
+data:
+  # Dataset paths
+  fasta_path: ${paths.data}/sequences.fasta
+  metadata_path: ${paths.data}/metadata.csv
+  
+  # Sequence settings
+  max_seq_len: 1500
+  vocab_size: 6  # A, C, G, T, N, PAD
+  
+  # Split settings
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  split_by: genus  # genus-level stratification
+  seed: 42
+  
+  # DataLoader settings
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+
+# Model configuration
+model:
+  # Encoder selection: flat, variability_gated, rnabert
+  encoder_type: flat
+  
+  # Shared encoder settings
+  embedding_dim: 128
+  hidden_dim: 256
+  dropout: 0.1
+  
+  # FlatEncoder specific (CNN baseline)
+  flat:
+    num_conv_layers: 4
+    kernel_sizes: [7, 5, 3, 3]
+    channels: [64, 128, 256, 256]
+    pool_type: adaptive_avg  # adaptive_avg, adaptive_max
+  
+  # VariabilityGatedEncoder specific
+  variability_gated:
+    num_layers: 4
+    gating_hidden: 64
+  
+  # RNABertEncoder specific (multimolecule/rnabert)
+  rnabert:
+    pretrained_model: multimolecule/rnabert
+    freeze_layers: 0  # number of layers to freeze, 0 = finetune all
+    
+  # Multi-task decoder
+  decoder:
+    hidden_dims: [128, 64]
+    
+    # Task configurations with class weights
+    tasks:
+      temperature:
+        num_classes: 3  # cold, mesophilic, thermophilic
+        class_weights: [1.0, 1.0, 1.0]
+      ph:
+        num_classes: 3  # acidic, neutral, alkaline
+        class_weights: [1.0, 1.0, 1.0]
+      oxygen:
+        num_classes: 2  # aerobic, anaerobic
+        class_weights: [1.0, 1.0]
+      media:
+        num_classes: 4  # minimal, rich, defined, complex
+        class_weights: [1.0, 1.0, 1.0, 1.0]
+
+# Training configuration
+training:
+  # Optimization
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  optimizer: adamw  # adam, adamw, sgd
+  scheduler: cosine  # cosine, step, plateau, none
+  warmup_epochs: 5
+  
+  # Scheduler specific
+  cosine:
+    t_max: ${training.max_epochs}
+    eta_min: 1e-6
+  step:
+    step_size: 10
+    gamma: 0.5
+  plateau:
+    patience: 5
+    factor: 0.5
+  
+  # Training loop
+  max_epochs: 100
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  
+  # Early stopping
+  early_stopping:
+    monitor: val/loss
+    patience: 15
+    mode: min
+  
+  # Checkpointing
+  checkpoint:
+    monitor: val/loss
+    save_top_k: 3
+    mode: min
+
+# Logging
+logging:
+  project_name: ai4dsni
+  experiment_name: ${model.encoder_type}_${now:%Y%m%d_%H%M%S}
+  log_every_n_steps: 10
+  
+# Hardware
+hardware:
+  accelerator: auto  # auto, cpu, gpu, mps
+  devices: 1
+  precision: 32  # 16, 32, bf16
+
+# Hydra settings
+hydra:
+  run:
+    dir: ${paths.output}/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${paths.output}/sweeps/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
