@@ -1,15 +1,15 @@
-# AI4DSNI
+# DSNI
 
-**AI for Deep-Sea Niche Identification** - A multi-task deep learning framework for predicting environmental preferences of deep-sea microorganisms from 16S rRNA sequences.
+**DSNI (DSMZ and NIH Integrated)** - A multi-task deep learning framework for predicting bacterial cultivation conditions from 16S rRNA sequences.
 
 ## Overview
 
-AI4DSNI uses deep learning to classify microbial sequences based on their environmental niche preferences:
+DSNI uses deep learning to classify microbial sequences based on their cultivation requirements:
 
-- **Temperature**: cold, mesophilic, thermophilic
-- **pH**: acidic, neutral, alkaline  
-- **Oxygen**: aerobic, anaerobic
-- **Media**: minimal, rich, defined, complex
+- **Temperature**: psychrophile (<20°C), mesophile (20-45°C), thermophile (>45°C)
+- **pH**: acidophile (<6), neutrophile (6-8), alkaliphile (>8)
+- **Oxygen**: aerobe, facultative, microaerophile, anaerobe
+- **Media**: 42 standardized cultivation media categories
 
 ## Project Structure
 
@@ -38,8 +38,7 @@ AI4DSNI/
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/ai4dsni.git
-cd ai4dsni
+
 
 # Create virtual environment
 python -m venv venv
@@ -87,9 +86,11 @@ pytest tests/ -v
    - 4 conv layers with batch normalization
    - Adaptive pooling for fixed-size output
 
-2. **VariabilityGatedEncoder**: Variability-aware gated architecture
-   - Position-specific gating mechanism
-   - Attention-based pooling
+2. **VariabilityGatedEncoder**: Variability-gated Transformer encoder
+   - Biological feature-conditioned gating (V-region tags, GC content, Shannon entropy)
+   - 6-layer Transformer with 8 attention heads
+   - Gate modulates embeddings before Transformer encoding
+   - [CLS] token pooling for sequence representation
 
 3. **RNABertEncoder**: Pretrained RNA-BERT wrapper
    - Uses `multimolecule/rnabert` from HuggingFace
@@ -99,7 +100,7 @@ pytest tests/ -v
 
 **MultiTaskDecoder**: Shared layers with task-specific heads
 - Configurable hidden dimensions
-- Per-task class weights for imbalanced data
+- Task loss weights: media=1.0, temperature=0.5, pH=0.5, oxygen=0.75
 
 ## Configuration
 
@@ -162,15 +163,3 @@ encoded = seq_encoder("ACGTACGT...")
 ## License
 
 MIT License
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@software{ai4dsni2024,
-  title={AI4DSNI: AI for Deep-Sea Niche Identification},
-  year={2024},
-  url={https://github.com/your-org/ai4dsni}
-}
-```

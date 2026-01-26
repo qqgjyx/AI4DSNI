@@ -1,4 +1,4 @@
-"""Data loading and preprocessing for AI4DSNI."""
+"""Data loading and preprocessing for DSNI (DSMZ and NIH Integrated)."""
 
 from __future__ import annotations
 
@@ -93,21 +93,21 @@ class SequenceEncoder:
 
 
 class DSNIDataset(Dataset):
-    """Deep-Sea Niche Identification dataset with multi-task labels.
-    
+    """DSNI (DSMZ and NIH Integrated) dataset with multi-task labels.
+
     Supports lazy loading of sequences and provides labels for:
-    - Temperature preference (cold/mesophilic/thermophilic)
-    - pH tolerance (acidic/neutral/alkaline)
-    - Oxygen requirement (aerobic/anaerobic)
-    - Media preference (minimal/rich/defined/complex)
+    - Temperature preference: psychrophile (<20°C), mesophile (20-45°C), thermophile (>45°C)
+    - pH tolerance: acidophile (<6), neutrophile (6-8), alkaliphile (>8)
+    - Oxygen requirement: aerobe, facultative, microaerophile, anaerobe
+    - Media preference: 42 standardized media categories
     """
-    
+
     # Label mappings for each task
     LABEL_MAPS = {
-        "temperature": {"cold": 0, "mesophilic": 1, "thermophilic": 2},
-        "ph": {"acidic": 0, "neutral": 1, "alkaline": 2},
-        "oxygen": {"aerobic": 0, "anaerobic": 1},
-        "media": {"minimal": 0, "rich": 1, "defined": 2, "complex": 3},
+        "temperature": {"psychrophile": 0, "mesophile": 1, "thermophile": 2},
+        "ph": {"acidophile": 0, "neutrophile": 1, "alkaliphile": 2},
+        "oxygen": {"aerobe": 0, "facultative": 1, "microaerophile": 2, "anaerobe": 3},
+        "media": None,  # 42 classes - handled dynamically or by integer labels
     }
     
     def __init__(

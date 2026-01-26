@@ -116,3 +116,6 @@ tmp/
 temp/
 *.tmp
 *.bak
+
+# Claude Code guidance (local file)
+CLAUDE.md

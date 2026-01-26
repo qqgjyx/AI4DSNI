@@ -1,4 +1,4 @@
-"""Core tests for AI4DSNI components."""
+"""Core tests for DSNI (DSMZ and NIH Integrated) components."""
 
 from __future__ import annotations
 
@@ -82,56 +82,56 @@ class TestSequenceEncoder:
 
 class TestDSNIDataset:
     """Tests for DSNIDataset."""
-    
+
     @pytest.fixture
     def sample_data(self):
-        """Create sample data for testing."""
+        """Create sample data for testing with paper's label names."""
         sequences = ["ACGT" * 10, "GCTA" * 10, "AAAA" * 10]
         metadata = pd.DataFrame({
-            "temperature": ["cold", "mesophilic", "thermophilic"],
-            "ph": ["acidic", "neutral", "alkaline"],
-            "oxygen": ["aerobic", "anaerobic", "aerobic"],
-            "media": ["minimal", "rich", "defined"],
+            "temperature": ["psychrophile", "mesophile", "thermophile"],
+            "ph": ["acidophile", "neutrophile", "alkaliphile"],
+            "oxygen": ["aerobe", "facultative", "microaerophile"],
+            "media": [0, 1, 2],  # Integer labels for 42 classes
         })
         return sequences, metadata
-    
+
     def test_dataset_length(self, sample_data):
         """Test dataset length."""
         sequences, metadata = sample_data
         dataset = DSNIDataset(sequences, metadata, max_seq_len=50)
-        
+
         assert len(dataset) == 3
-    
+
     def test_dataset_getitem(self, sample_data):
         """Test getting items from dataset."""
         sequences, metadata = sample_data
         dataset = DSNIDataset(sequences, metadata, max_seq_len=50)
-        
+
         item = dataset[0]
-        
+
         assert "sequence" in item
         assert "labels" in item
         assert "mask" in item
         assert item["sequence"].shape == (50,)
         assert item["mask"].shape == (50,)
-        
-        # Check labels
-        assert item["labels"]["temperature"] == 0  # cold
-        assert item["labels"]["ph"] == 0  # acidic
-        assert item["labels"]["oxygen"] == 0  # aerobic
-        assert item["labels"]["media"] == 0  # minimal
-    
+
+        # Check labels (using paper's terminology)
+        assert item["labels"]["temperature"] == 0  # psychrophile
+        assert item["labels"]["ph"] == 0  # acidophile
+        assert item["labels"]["oxygen"] == 0  # aerobe
+        assert item["labels"]["media"] == 0  # media class 0
+
     def test_dataset_missing_labels(self):
         """Test handling of missing labels."""
         sequences = ["ACGT" * 10]
         metadata = pd.DataFrame({
             "temperature": [None],
-            "ph": ["acidic"],
+            "ph": ["acidophile"],
         })
         dataset = DSNIDataset(sequences, metadata, max_seq_len=50)
-        
+
         item = dataset[0]
-        
+
         # Missing temperature should be -100
         assert item["labels"]["temperature"] == -100
         assert item["labels"]["ph"] == 0
@@ -139,18 +139,18 @@ class TestDSNIDataset:
 
 class TestGetSplits:
     """Tests for get_splits function."""
-    
+
     @pytest.fixture
     def sample_data(self):
-        """Create larger sample data for split testing."""
+        """Create larger sample data for split testing with paper's labels."""
         n_samples = 100
         sequences = ["ACGT" * 25 for _ in range(n_samples)]
         metadata = pd.DataFrame({
             "genus": [f"genus_{i % 10}" for i in range(n_samples)],
-            "temperature": ["cold"] * n_samples,
-            "ph": ["neutral"] * n_samples,
-            "oxygen": ["aerobic"] * n_samples,
-            "media": ["minimal"] * n_samples,
+            "temperature": ["mesophile"] * n_samples,
+            "ph": ["neutrophile"] * n_samples,
+            "oxygen": ["facultative"] * n_samples,
+            "media": [0] * n_samples,  # Integer label
         })
         return sequences, metadata
     
@@ -212,8 +212,8 @@ class TestFlatEncoder:
 
 
 class TestVariabilityGatedEncoder:
-    """Tests for VariabilityGatedEncoder."""
-    
+    """Tests for VariabilityGatedEncoder (Transformer + biological gating)."""
+
     def test_forward_shape(self):
         """Test output shape."""
         encoder = VariabilityGatedEncoder(
@@ -221,33 +221,69 @@ class TestVariabilityGatedEncoder:
             embedding_dim=32,
             hidden_dim=64,
             num_layers=2,
+            num_heads=4,
+            ff_dim=128,
+            max_seq_len=200,
         )
-        
+
         x = torch.randint(0, 6, (4, 100))
         mask = torch.ones(4, 100)
         output = encoder(x, mask)
-        
+
         assert output.shape == (4, 64)
-    
+
     def test_with_padding_mask(self):
         """Test handling of padding mask."""
         encoder = VariabilityGatedEncoder(
             vocab_size=6,
             embedding_dim=32,
             hidden_dim=64,
+            num_layers=2,
+            num_heads=4,
+            max_seq_len=100,
         )
-        
+
         x = torch.randint(0, 6, (2, 50))
         mask = torch.ones(2, 50)
         mask[0, 25:] = 0  # Pad second half of first sequence
-        
+
         output = encoder(x, mask)
         assert output.shape == (2, 64)
+
+    def test_v_region_mask(self):
+        """Test V-region mask creation."""
+        encoder = VariabilityGatedEncoder(
+            vocab_size=6,
+            hidden_dim=64,
+            max_seq_len=1500,
+        )
+
+        # V-regions should be marked as 1
+        assert encoder.v_region_mask.shape == (1, 1500)
+        # V1 region (69-99) should be marked
+        assert encoder.v_region_mask[0, 80] == 1.0
+        # Conserved region (before V1) should be 0
+        assert encoder.v_region_mask[0, 50] == 0.0
+
+    def test_biological_features(self):
+        """Test that biological features (GC, entropy) are computed."""
+        encoder = VariabilityGatedEncoder(
+            vocab_size=6,
+            hidden_dim=64,
+            num_layers=1,
+            max_seq_len=100,
+        )
+
+        # Create sequence with known GC content
+        x = torch.tensor([[2, 3, 2, 3, 2, 3, 2, 3, 2, 3]])  # All GC (C=2, G=3)
+        gc = encoder._compute_local_gc_content(x)
+        # Should have high GC content
+        assert gc[0, 5] > 0.8  # Center of window should be ~100% GC
 
 
 class TestMultiTaskDecoder:
     """Tests for MultiTaskDecoder."""
-    
+
     def test_forward_all_tasks(self):
         """Test forward with all tasks."""
         decoder = MultiTaskDecoder(
@@ -256,19 +292,19 @@ class TestMultiTaskDecoder:
             task_configs={
                 "temperature": {"num_classes": 3},
                 "ph": {"num_classes": 3},
-                "oxygen": {"num_classes": 2},
+                "oxygen": {"num_classes": 4},  # 4 classes per paper
             },
         )
-        
+
         x = torch.randn(4, 64)
         outputs = decoder(x)
-        
+
         assert "temperature" in outputs
         assert "ph" in outputs
         assert "oxygen" in outputs
         assert outputs["temperature"].shape == (4, 3)
         assert outputs["ph"].shape == (4, 3)
-        assert outputs["oxygen"].shape == (4, 2)
+        assert outputs["oxygen"].shape == (4, 4)
     
     def test_forward_specific_tasks(self):
         """Test forward with specific tasks."""
@@ -350,10 +386,15 @@ class TestCreateEncoder:
         config = {
             "embedding_dim": 32,
             "hidden_dim": 64,
-            "variability_gated": {"num_layers": 2},
+            "max_seq_len": 200,
+            "variability_gated": {
+                "num_layers": 2,
+                "num_heads": 4,
+                "ff_dim": 128,
+            },
         }
         encoder = create_encoder("variability_gated", config)
-        
+
         assert isinstance(encoder, VariabilityGatedEncoder)
     
     def test_invalid_encoder_type(self):

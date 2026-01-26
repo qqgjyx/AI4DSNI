@@ -1,4 +1,4 @@
-# AI4DSNI Configuration
+# DSNI Configuration (DSMZ and NIH Integrated)
 # Unified config with Hydra interpolation
 
 defaults:
@@ -51,10 +51,13 @@ model:
     channels: [64, 128, 256, 256]
     pool_type: adaptive_avg  # adaptive_avg, adaptive_max
   
-  # VariabilityGatedEncoder specific
+  # VariabilityGatedEncoder specific (Transformer + biological gating)
   variability_gated:
-    num_layers: 4
-    gating_hidden: 64
+    num_layers: 6          # Transformer layers
+    num_heads: 8           # Attention heads
+    ff_dim: 1024           # Feed-forward dimension
+    gating_hidden: 64      # Gate network hidden dim
+    complexity_window: 21  # Window size for GC/entropy computation
   
   # RNABertEncoder specific (multimolecule/rnabert)
   rnabert:
@@ -68,26 +71,33 @@ model:
     # Task configurations with class weights
     tasks:
       temperature:
-        num_classes: 3  # cold, mesophilic, thermophilic
-        class_weights: [1.0, 1.0, 1.0]
+        num_classes: 3  # psychrophile, mesophile, thermophile
+        class_weights: null  # Use inverse-frequency weighting
       ph:
-        num_classes: 3  # acidic, neutral, alkaline
-        class_weights: [1.0, 1.0, 1.0]
+        num_classes: 3  # acidophile, neutrophile, alkaliphile
+        class_weights: null
       oxygen:
-        num_classes: 2  # aerobic, anaerobic
-        class_weights: [1.0, 1.0]
+        num_classes: 4  # aerobe, facultative, microaerophile, anaerobe
+        class_weights: null
       media:
-        num_classes: 4  # minimal, rich, defined, complex
-        class_weights: [1.0, 1.0, 1.0, 1.0]
+        num_classes: 42  # standardized media categories
+        class_weights: null
 
 # Training configuration
 training:
   # Optimization
   learning_rate: 1e-4
-  weight_decay: 1e-5
+  weight_decay: 0.01
   optimizer: adamw  # adam, adamw, sgd
   scheduler: cosine  # cosine, step, plateau, none
-  warmup_epochs: 5
+  warmup_ratio: 0.1  # Linear warmup over first 10% of training steps
+
+  # Task loss weights (from paper)
+  task_loss_weights:
+    media: 1.0
+    temperature: 0.5
+    ph: 0.5
+    oxygen: 0.75
   
   # Scheduler specific
   cosine:
@@ -119,7 +129,7 @@ training:
 
 # Logging
 logging:
-  project_name: ai4dsni
+  project_name: dsni
   experiment_name: ${model.encoder_type}_${now:%Y%m%d_%H%M%S}
   log_every_n_steps: 10
   

@@ -1,11 +1,13 @@
-"""Model architectures for AI4DSNI."""
+"""Model architectures for DSNI (DSMZ and NIH Integrated)."""
 
 from __future__ import annotations
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -164,123 +166,252 @@ class FlatEncoder(BaseEncoder):
 
 
 class VariabilityGatedEncoder(BaseEncoder):
-    """Variability-gated encoder architecture.
-    
-    Placeholder for custom architecture that uses variability information
-    to gate sequence features. Can be extended with specific implementation.
-    
-    Architecture:
-        - Embedding layer
-        - Variability-gated convolutional blocks
-        - Attention-based pooling
-        - Final projection
+    """Variability-gated encoder with biological feature-conditioned gating.
+
+    Architecture from paper:
+        - Embedding layer + sinusoidal positional encoding
+        - Variability gating layer conditioned on biological features:
+          - Region tags (V1-V9 hypervariable vs conserved)
+          - Positional encoding
+          - Local GC content
+          - Local Shannon entropy
+        - Transformer encoder (applied after gating)
+        - [CLS] token pooling
+
+    The gate modulates embeddings: h_gated = g * h where g = σ(W_g * f + b_g)
     """
-    
+
+    # Standard E. coli 16S rRNA V-region boundaries (0-indexed)
+    V_REGIONS = {
+        "V1": (69, 99),
+        "V2": (137, 242),
+        "V3": (433, 497),
+        "V4": (576, 682),
+        "V5": (822, 879),
+        "V6": (986, 1043),
+        "V7": (1117, 1173),
+        "V8": (1243, 1294),
+        "V9": (1435, 1465),
+    }
+
     def __init__(
         self,
         vocab_size: int = 6,
         embedding_dim: int = 128,
         hidden_dim: int = 256,
         dropout: float = 0.1,
-        num_layers: int = 4,
+        num_layers: int = 6,
+        num_heads: int = 8,
+        ff_dim: int = 1024,
         gating_hidden: int = 64,
+        complexity_window: int = 21,
+        max_seq_len: int = 1500,
     ):
         super().__init__(vocab_size, embedding_dim, hidden_dim, dropout)
-        
+
         self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.ff_dim = ff_dim
         self.gating_hidden = gating_hidden
-        
+        self.complexity_window = complexity_window
+        self.max_seq_len = max_seq_len
+
         # Embedding layer
-        self.embedding = nn.Embedding(
-            vocab_size, 
-            embedding_dim, 
-            padding_idx=0
+        self.embedding = nn.Embedding(vocab_size, hidden_dim, padding_idx=0)
+
+        # Sinusoidal positional encoding (precomputed)
+        self.register_buffer("pe", self._create_positional_encoding(max_seq_len, hidden_dim))
+
+        # Gating layer: maps biological features to gate values
+        # Input features: [region_tag(1), pe(hidden_dim), gc_content(1), entropy(1)]
+        gate_input_dim = 1 + hidden_dim + 1 + 1
+        self.gate_network = nn.Sequential(
+            nn.Linear(gate_input_dim, gating_hidden),
+            nn.ReLU(),
+            nn.Linear(gating_hidden, hidden_dim),
+            nn.Sigmoid(),
         )
-        
-        # Gated convolutional blocks
-        self.conv_blocks = nn.ModuleList()
-        self.gate_layers = nn.ModuleList()
-        
-        in_channels = embedding_dim
-        out_channels = embedding_dim
-        
-        for i in range(num_layers):
-            # Main convolution
-            self.conv_blocks.append(nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm1d(out_channels),
-                nn.ReLU(),
-            ))
-            
-            # Gating network (learns position-specific importance)
-            self.gate_layers.append(nn.Sequential(
-                nn.Conv1d(in_channels, gating_hidden, kernel_size=1),
-                nn.ReLU(),
-                nn.Conv1d(gating_hidden, out_channels, kernel_size=1),
-                nn.Sigmoid(),
-            ))
-            
-            in_channels = out_channels
-        
-        # Attention-based pooling
-        self.attention = nn.Sequential(
-            nn.Linear(out_channels, gating_hidden),
-            nn.Tanh(),
-            nn.Linear(gating_hidden, 1),
+
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            batch_first=True,
         )
-        
-        # Final projection
-        self.fc = nn.Linear(out_channels, hidden_dim)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dim))
+
         self.dropout_layer = nn.Dropout(dropout)
-        
+
+        # Precompute V-region mask
+        self.register_buffer("v_region_mask", self._create_v_region_mask(max_seq_len))
+
+    def _create_positional_encoding(self, max_len: int, d_model: int) -> torch.Tensor:
+        """Create sinusoidal positional encoding."""
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        return pe.unsqueeze(0)  # (1, max_len, d_model)
+
+    def _create_v_region_mask(self, max_len: int) -> torch.Tensor:
+        """Create binary mask for hypervariable regions (1 = V-region, 0 = conserved)."""
+        mask = torch.zeros(max_len)
+        for start, end in self.V_REGIONS.values():
+            if end <= max_len:
+                mask[start:end] = 1.0
+            elif start < max_len:
+                mask[start:max_len] = 1.0
+        return mask.unsqueeze(0)  # (1, max_len)
+
+    def _compute_local_gc_content(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute local GC content with sliding window.
+
+        Args:
+            x: Input tensor of shape (batch, seq_len) with nucleotide indices.
+               Vocabulary: PAD=0, A=1, C=2, G=3, T/U=4, N=5
+
+        Returns:
+            GC content tensor of shape (batch, seq_len).
+        """
+        # G=3, C=2
+        is_gc = ((x == 2) | (x == 3)).float()
+        is_valid = (x != 0).float()  # Non-padding
+
+        # Use avg pooling for sliding window
+        kernel_size = self.complexity_window
+        padding = kernel_size // 2
+
+        # Reshape for conv1d: (batch, 1, seq_len)
+        is_gc = is_gc.unsqueeze(1)
+        is_valid = is_valid.unsqueeze(1)
+
+        # Sum of GC in window
+        gc_sum = F.avg_pool1d(is_gc, kernel_size, stride=1, padding=padding) * kernel_size
+        valid_sum = F.avg_pool1d(is_valid, kernel_size, stride=1, padding=padding) * kernel_size
+
+        # GC content = gc_count / valid_count
+        gc_content = gc_sum / valid_sum.clamp(min=1)
+
+        return gc_content.squeeze(1)  # (batch, seq_len)
+
+    def _compute_local_entropy(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute local Shannon entropy with sliding window.
+
+        Args:
+            x: Input tensor of shape (batch, seq_len).
+
+        Returns:
+            Entropy tensor of shape (batch, seq_len).
+        """
+        batch_size, seq_len = x.shape
+        device = x.device
+
+        # One-hot encode (excluding PAD=0)
+        # Bases: A=1, C=2, G=3, T=4 -> indices 0-3
+        x_clamped = x.clamp(1, 4) - 1  # Map to 0-3
+        one_hot = F.one_hot(x_clamped, num_classes=4).float()  # (batch, seq_len, 4)
+
+        # Mask padding
+        is_valid = (x != 0).float().unsqueeze(-1)  # (batch, seq_len, 1)
+        one_hot = one_hot * is_valid
+
+        # Transpose for conv1d: (batch, 4, seq_len)
+        one_hot = one_hot.transpose(1, 2)
+
+        # Sum in window
+        kernel_size = self.complexity_window
+        padding = kernel_size // 2
+        counts = F.avg_pool1d(one_hot, kernel_size, stride=1, padding=padding) * kernel_size
+
+        # Compute probabilities
+        total = counts.sum(dim=1, keepdim=True).clamp(min=1)  # (batch, 1, seq_len)
+        probs = counts / total  # (batch, 4, seq_len)
+
+        # Shannon entropy: -sum(p * log(p))
+        log_probs = torch.log(probs.clamp(min=1e-10))
+        entropy = -(probs * log_probs).sum(dim=1)  # (batch, seq_len)
+
+        # Normalize to [0, 1] (max entropy for 4 symbols is log(4) ≈ 1.386)
+        entropy = entropy / np.log(4)
+
+        return entropy
+
     def forward(
-        self, 
-        x: torch.Tensor, 
+        self,
+        x: torch.Tensor,
         mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Forward pass through variability-gated encoder.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len).
             mask: Attention mask of shape (batch_size, seq_len).
-            
+
         Returns:
             Embeddings of shape (batch_size, hidden_dim).
         """
-        # Embed: (batch, seq_len) -> (batch, seq_len, embed_dim)
-        x = self.embedding(x)
-        x = self.dropout_layer(x)
-        
-        # Transpose for conv1d: (batch, embed_dim, seq_len)
-        x = x.transpose(1, 2)
-        
-        # Apply gated conv blocks
-        for conv_block, gate_layer in zip(self.conv_blocks, self.gate_layers):
-            # Compute features and gates
-            features = conv_block(x)
-            gates = gate_layer(x)
-            
-            # Gated combination with residual
-            x = features * gates + x
-        
-        # Transpose back: (batch, seq_len, channels)
-        x = x.transpose(1, 2)
-        
-        # Attention pooling
-        attention_weights = self.attention(x)  # (batch, seq_len, 1)
-        
+        batch_size, seq_len = x.shape
+
+        # Compute biological features
+        region_tags = self.v_region_mask[:, :seq_len].expand(batch_size, -1)  # (batch, seq_len)
+        gc_content = self._compute_local_gc_content(x)  # (batch, seq_len)
+        entropy = self._compute_local_entropy(x)  # (batch, seq_len)
+        pos_encoding = self.pe[:, :seq_len, :].expand(batch_size, -1, -1)  # (batch, seq_len, hidden_dim)
+
+        # Concatenate features for gating: [region_tag, pe, gc, entropy]
+        gate_features = torch.cat([
+            region_tags.unsqueeze(-1),  # (batch, seq_len, 1)
+            pos_encoding,  # (batch, seq_len, hidden_dim)
+            gc_content.unsqueeze(-1),  # (batch, seq_len, 1)
+            entropy.unsqueeze(-1),  # (batch, seq_len, 1)
+        ], dim=-1)  # (batch, seq_len, 1 + hidden_dim + 1 + 1)
+
+        # Compute gates
+        gates = self.gate_network(gate_features)  # (batch, seq_len, hidden_dim)
+
+        # Embed sequences and add positional encoding
+        embeddings = self.embedding(x)  # (batch, seq_len, hidden_dim)
+        embeddings = embeddings + pos_encoding
+        embeddings = self.dropout_layer(embeddings)
+
+        # Apply gating (element-wise multiplication)
+        gated_embeddings = gates * embeddings  # (batch, seq_len, hidden_dim)
+
+        # Prepend CLS token
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # (batch, 1, hidden_dim)
+        transformer_input = torch.cat([cls_tokens, gated_embeddings], dim=1)  # (batch, seq_len+1, hidden_dim)
+
+        # Update mask for CLS token
         if mask is not None:
-            # Mask out padding positions
-            mask = mask.unsqueeze(-1)  # (batch, seq_len, 1)
-            attention_weights = attention_weights.masked_fill(mask == 0, float("-inf"))
-        
-        attention_weights = F.softmax(attention_weights, dim=1)
-        x = (x * attention_weights).sum(dim=1)  # (batch, channels)
-        
-        # Project to hidden_dim
-        x = self.fc(x)
-        
-        return x
+            cls_mask = torch.ones(batch_size, 1, device=mask.device)
+            transformer_mask = torch.cat([cls_mask, mask.float()], dim=1)  # (batch, seq_len+1)
+            # Convert to attention mask format (True = masked)
+            src_key_padding_mask = (transformer_mask == 0)
+        else:
+            src_key_padding_mask = None
+
+        # Transformer encoding
+        transformer_output = self.transformer(
+            transformer_input,
+            src_key_padding_mask=src_key_padding_mask
+        )  # (batch, seq_len+1, hidden_dim)
+
+        # Extract CLS token representation
+        cls_output = transformer_output[:, 0, :]  # (batch, hidden_dim)
+
+        return cls_output
+
+    @property
+    def output_dim(self) -> int:
+        return self.hidden_dim
 
 
 class RNABertEncoder(BaseEncoder):
@@ -415,12 +546,12 @@ class RNABertEncoder(BaseEncoder):
 
 class MultiTaskDecoder(nn.Module):
     """Multi-task decoder with separate heads for each task.
-    
+
     Supports:
-        - Temperature classification (3 classes)
-        - pH classification (3 classes)
-        - Oxygen classification (2 classes)
-        - Media classification (4 classes)
+        - Temperature classification (3 classes): psychrophile, mesophile, thermophile
+        - pH classification (3 classes): acidophile, neutrophile, alkaliphile
+        - Oxygen classification (4 classes): aerobe, facultative, microaerophile, anaerobe
+        - Media classification (42 classes): standardized media categories
     """
     
     def __init__(
@@ -446,12 +577,12 @@ class MultiTaskDecoder(nn.Module):
         self.hidden_dims = hidden_dims or [128, 64]
         self.dropout = dropout
         
-        # Default task configs
+        # Default task configs (matching paper)
         self.task_configs = task_configs or {
-            "temperature": {"num_classes": 3, "class_weights": None},
-            "ph": {"num_classes": 3, "class_weights": None},
-            "oxygen": {"num_classes": 2, "class_weights": None},
-            "media": {"num_classes": 4, "class_weights": None},
+            "temperature": {"num_classes": 3, "class_weights": None},  # psychrophile, mesophile, thermophile
+            "ph": {"num_classes": 3, "class_weights": None},  # acidophile, neutrophile, alkaliphile
+            "oxygen": {"num_classes": 4, "class_weights": None},  # aerobe, facultative, microaerophile, anaerobe
+            "media": {"num_classes": 42, "class_weights": None},  # standardized categories
         }
         
         # Shared layers
@@ -589,9 +720,16 @@ def create_encoder(
     elif encoder_type == "variability_gated":
         vg_config = config.get("variability_gated", {})
         return VariabilityGatedEncoder(
-            **common_args,
-            num_layers=vg_config.get("num_layers", 4),
+            vocab_size=common_args["vocab_size"],
+            embedding_dim=common_args["embedding_dim"],
+            hidden_dim=common_args["hidden_dim"],
+            dropout=common_args["dropout"],
+            num_layers=vg_config.get("num_layers", 6),
+            num_heads=vg_config.get("num_heads", 8),
+            ff_dim=vg_config.get("ff_dim", 1024),
             gating_hidden=vg_config.get("gating_hidden", 64),
+            complexity_window=vg_config.get("complexity_window", 21),
+            max_seq_len=config.get("max_seq_len", 1500),
         )
     
     elif encoder_type == "rnabert":

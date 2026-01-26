@@ -1,4 +1,4 @@
-"""Training module for AI4DSNI using PyTorch Lightning."""
+"""Training module for DSNI (DSMZ and NIH Integrated) using PyTorch Lightning."""
 
 from __future__ import annotations
 
@@ -27,25 +27,26 @@ logger = logging.getLogger(__name__)
 
 
 class DSNIModule(pl.LightningModule):
-    """PyTorch Lightning module for Deep-Sea Niche Identification.
-    
+    """PyTorch Lightning module for DSNI (DSMZ and NIH Integrated).
+
     Combines encoder and decoder for multi-task classification.
     """
-    
+
     def __init__(
         self,
         encoder: BaseEncoder,
         decoder: MultiTaskDecoder,
         learning_rate: float = 1e-4,
-        weight_decay: float = 1e-5,
+        weight_decay: float = 0.01,
         optimizer: str = "adamw",
         scheduler: str = "cosine",
         scheduler_config: Optional[Dict] = None,
-        warmup_epochs: int = 5,
+        warmup_ratio: float = 0.1,
+        task_loss_weights: Optional[Dict[str, float]] = None,
         tasks: Optional[List[str]] = None,
     ):
         """Initialize the module.
-        
+
         Args:
             encoder: Sequence encoder.
             decoder: Multi-task decoder.
@@ -54,16 +55,25 @@ class DSNIModule(pl.LightningModule):
             optimizer: Optimizer type ('adam', 'adamw', 'sgd').
             scheduler: Scheduler type ('cosine', 'step', 'plateau', 'none').
             scheduler_config: Additional scheduler configuration.
-            warmup_epochs: Number of warmup epochs.
+            warmup_ratio: Fraction of training steps for linear warmup (default 10%).
+            task_loss_weights: Dict mapping task names to loss weights.
             tasks: List of task names.
         """
         super().__init__()
         self.save_hyperparameters(ignore=["encoder", "decoder"])
-        
+
         self.encoder = encoder
         self.decoder = decoder
         self.tasks = tasks or list(decoder.heads.keys())
-        
+
+        # Task loss weights (from paper: media=1.0, temp=0.5, pH=0.5, oxygen=0.75)
+        self.task_loss_weights = task_loss_weights or {
+            "media": 1.0,
+            "temperature": 0.5,
+            "ph": 0.5,
+            "oxygen": 0.75,
+        }
+
         # Create metrics for each task
         self._create_metrics()
         
@@ -113,34 +123,40 @@ class DSNIModule(pl.LightningModule):
         return logits
     
     def _shared_step(
-        self, 
-        batch: Dict[str, torch.Tensor], 
+        self,
+        batch: Dict[str, torch.Tensor],
         stage: str
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Shared step for train/val/test.
-        
+
         Args:
             batch: Batch dict with 'sequence', 'mask', 'labels'.
             stage: One of 'train', 'val', 'test'.
-            
+
         Returns:
             Tuple of (total_loss, logits_dict).
         """
         sequence = batch["sequence"]
         mask = batch["mask"]
         labels = batch["labels"]
-        
+
         # Forward pass
         logits = self(sequence, mask)
-        
-        # Compute loss
-        total_loss, task_losses = self.decoder.compute_loss(logits, labels)
-        
+
+        # Compute loss with task weights
+        _, task_losses = self.decoder.compute_loss(logits, labels)
+
+        # Apply task loss weights
+        total_loss = 0.0
+        for task, loss in task_losses.items():
+            weight = self.task_loss_weights.get(task, 1.0)
+            total_loss = total_loss + weight * loss
+
         # Log losses
         self.log(f"{stage}/loss", total_loss, prog_bar=True, sync_dist=True)
         for task, loss in task_losses.items():
             self.log(f"{stage}/{task}_loss", loss, sync_dist=True)
-        
+
         # Update metrics
         metrics_dict = getattr(self, f"{stage}_metrics")
         for task in self.tasks:
@@ -152,7 +168,7 @@ class DSNIModule(pl.LightningModule):
                     preds = logits[task][valid_mask].argmax(dim=-1)
                     targets = task_labels[valid_mask]
                     metrics_dict[task].update(preds, targets)
-        
+
         return total_loss, logits
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -359,11 +375,12 @@ def train(cfg: Dict[str, Any]) -> pl.Trainer:
         encoder=encoder,
         decoder=decoder,
         learning_rate=train_cfg.get("learning_rate", 1e-4),
-        weight_decay=train_cfg.get("weight_decay", 1e-5),
+        weight_decay=train_cfg.get("weight_decay", 0.01),
         optimizer=train_cfg.get("optimizer", "adamw"),
         scheduler=train_cfg.get("scheduler", "cosine"),
         scheduler_config=train_cfg.get(train_cfg.get("scheduler", "cosine"), {}),
-        warmup_epochs=train_cfg.get("warmup_epochs", 5),
+        warmup_ratio=train_cfg.get("warmup_ratio", 0.1),
+        task_loss_weights=train_cfg.get("task_loss_weights"),
     )
     
     # Create callbacks
@@ -432,7 +449,7 @@ def _create_dummy_data(n_samples: int = 100) -> Tuple[List[str], "pd.DataFrame"]
     """Create dummy data for testing when real data is not available."""
     import pandas as pd
     import random
-    
+
     # Generate random sequences
     nucleotides = ["A", "C", "G", "T"]
     sequences = []
@@ -440,15 +457,15 @@ def _create_dummy_data(n_samples: int = 100) -> Tuple[List[str], "pd.DataFrame"]
         seq_len = random.randint(500, 1500)
         seq = "".join(random.choices(nucleotides, k=seq_len))
         sequences.append(seq)
-    
-    # Generate random metadata
+
+    # Generate random metadata with paper's label names
     metadata = pd.DataFrame({
         "id": [f"seq_{i}" for i in range(n_samples)],
         "genus": [f"genus_{i % 10}" for i in range(n_samples)],
-        "temperature": random.choices(["cold", "mesophilic", "thermophilic"], k=n_samples),
-        "ph": random.choices(["acidic", "neutral", "alkaline"], k=n_samples),
-        "oxygen": random.choices(["aerobic", "anaerobic"], k=n_samples),
-        "media": random.choices(["minimal", "rich", "defined", "complex"], k=n_samples),
+        "temperature": random.choices(["psychrophile", "mesophile", "thermophile"], k=n_samples),
+        "ph": random.choices(["acidophile", "neutrophile", "alkaliphile"], k=n_samples),
+        "oxygen": random.choices(["aerobe", "facultative", "microaerophile", "anaerobe"], k=n_samples),
+        "media": [random.randint(0, 41) for _ in range(n_samples)],  # 42 media classes as integers
     })
-    
+
     return sequences, metadata
