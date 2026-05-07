@@ -28,7 +28,7 @@ AI4DSNI/
 │   └── test_core.py         # Unit tests
 ├── notebooks/
 │   └── analysis.ipynb       # Analysis and visualization
-├── data/                     # Released subset (7,470 strains)
+├── data/                     # Released data
 │   ├── sequences.fasta
 │   ├── metadata.csv
 │   └── media_compositions.json
