@@ -28,7 +28,10 @@ AI4DSNI/
 │   └── test_core.py         # Unit tests
 ├── notebooks/
 │   └── analysis.ipynb       # Analysis and visualization
-├── private/                  # Gitignored data/outputs
+├── data/                     # Released subset (7,470 strains)
+│   ├── sequences.fasta
+│   ├── metadata.csv
+│   └── media_compositions.json
 ├── requirements.txt
 ├── setup.py
 └── README.md
@@ -53,11 +56,12 @@ pip install -e .
 
 ## Quick Start
 
-### 1. Prepare Data
+### 1. Data
 
-Place your data files in the `data/` directory:
-- `sequences.fasta`: 16S rRNA sequences in FASTA format
-- `metadata.csv`: CSV with columns for `genus`, `temperature`, `ph`, `oxygen`, `media`
+The `data/` directory contains the released data:
+- `sequences.fasta` — 16S rRNA sequences
+- `metadata.csv` — per-strain table with sequence, taxonomy, and the four cultivation labels (temperature, pH, oxygen, media)
+- `media_compositions.json` — growth-medium recipes
 
 ### 2. Train a Model
 
