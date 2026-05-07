@@ -85,13 +85,13 @@ venv.bak/
 # Private directory (data, outputs, etc.)
 private/
 
-# Data files
-data/
-*.fasta
+# Data files (raw / intermediate). Released data/ is explicitly whitelisted.
 *.fa
 *.fna
-*.csv
 !configs/*.yaml
+!data/metadata.csv
+!data/sequences.fasta
+!data/media_compositions.json
 
 # Model outputs
 outputs/
