@@ -23,7 +23,8 @@ AI4DSNI/
 │   ├── models.py            # Encoders + decoder architectures
 │   └── train.py             # Lightning module + training
 ├── scripts/
-│   └── run.py               # Training entry point
+│   ├── run.py               # Training entry point
+│   └── make_splits.py       # Genus-aware stratified train/val/test split
 ├── tests/
 │   └── test_core.py         # Unit tests
 ├── notebooks/
